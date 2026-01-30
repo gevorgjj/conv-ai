@@ -49,14 +49,16 @@ else:
     llm = None
     print("WARNING: OPENAI_API_KEY not found.")
 
+# print(db.get_table_info())
+
 # Toolkit and Agent
 agent_executor = None
 if db and llm:
     toolkit = SQLDatabaseToolkit(db=db, llm=llm)
     all_tools = toolkit.get_tools()
-    query_checker = next(t for t in all_tools if t.name == "sql_db_query_checker")
+    # query_checker = next(t for t in all_tools if t.name == "sql_db_query_checker")
     query_tool = next(t for t in all_tools if t.name == "sql_db_query")
-    tools = [query_checker, query_tool]
+    tools = [query_tool]
     k = 10
     db_context = db.get_table_info()
     
@@ -111,13 +113,36 @@ if db and llm:
         '10' = RWD (Rear-Wheel Drive)
         '20' = AWD (All-Wheel Drive)
     
+    base_color (Vehicle Base Color in vehicle_colors table):
+        '0' = White
+        '10' = Black
+        '20' = Gray
+        '30' = Silver
+        '40' = Blue
+        '50' = Red
+        '60' = Green
+        '70' = Yellow
+        '80' = Gold
+        '90' = Brown
+        '100' = Beige
+        '110' = Orange
+        '120' = Purple
+        '130' = Pink
+        '140' = Turquoise
+        '150' = Other
+    
     QUERY EXAMPLES:
     - For "SUV" cars: use body_type::text IN ('30', '31') to include both 3-door and 5-door SUVs
     - For "Hatchback" cars: use body_type::text IN ('20', '21') to include both 3-door and 5-door hatchbacks
     - For "electric" cars: use fuel_type::text = '20'
     - For "AWD" or "all-wheel drive" cars: use drivetrain_type::text = '20'
+    - For "red cars": JOIN vehicle_colors vc ON listing.exterior_color_id = vc.id WHERE vc.base_color::text = '50'
+    - For "black interior": JOIN vehicle_colors vc ON listing.interior_color_id = vc.id WHERE vc.base_color::text = '10'
+    - For "metallic cars": JOIN vehicle_colors vc ON listing.exterior_color_id = vc.id WHERE vc.is_metallic = true
+    - For "matte cars": JOIN vehicle_colors vc ON listing.exterior_color_id = vc.id WHERE vc.is_matte = true
+    - You can combine: "metallic red cars" → WHERE vc.base_color::text = '50' AND vc.is_metallic = true
     
-    When displaying results, show the human-readable names (e.g., "SUV", "Electric", "AWD") instead of the numeric codes.
+    When displaying results, show the human-readable names (e.g., "SUV", "Electric", "AWD", "Red") instead of the numeric codes.
 
     RESPONSE FORMATTING:
     1.  If you find cars, your response must be formatted in Markdown.
@@ -130,7 +155,6 @@ if db and llm:
         llm,
         tools,
         system_prompt=system_prompt,
-        verbose=True
     )
 
 def predict(message, history):
@@ -161,13 +185,42 @@ def predict(message, history):
         # Add current message
         messages.append({"role": "user", "content": message})
 
-        # Invoke the agent with messages format
-        response = agent.invoke({"messages": messages})
+        print("\n" + "="*50)
+        print(f"USER INPUT: {message}")
+        print("="*50)
+
+        # Stream the agent response to see tool calls
+        final_response = None
+        for step in agent.stream({"messages": messages}, stream_mode="values"):
+            last_message = step["messages"][-1]
+            
+            # Check if it's a tool call (AIMessage with tool_calls)
+            if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+                for tool_call in last_message.tool_calls:
+                    print(f"\n🔧 TOOL CALL: {tool_call['name']}")
+                    print(f"   Args: {tool_call['args']}")
+            
+            # Check if it's a tool response
+            if hasattr(last_message, 'type') and last_message.type == 'tool':
+                print(f"\n📤 TOOL RESPONSE ({last_message.name}):")
+                # Truncate long responses for readability
+                content = str(last_message.content)
+                if len(content) > 500:
+                    print(f"   {content[:500]}...")
+                else:
+                    print(f"   {content}")
+            
+            final_response = last_message
         
-        # Extract the final response from the agent
-        final_message = response["messages"][-1]
-        return final_message.content
+        print("\n" + "="*50)
+        print("FINAL RESPONSE:")
+        print(final_response.content if hasattr(final_response, 'content') else final_response)
+        print("="*50 + "\n")
+        
+        return final_response.content if hasattr(final_response, 'content') else str(final_response)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return f"An error occurred: {str(e)}"
 
 
@@ -183,16 +236,19 @@ if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
 
 
-"""
-# logging 
-"question = "show me cars under 100000 usd"
+# """
+# # logging 
+# "question = "show me cars under 100000 usd"
 
-for step in agent.stream(
-    {"messages": [{"role": "user", "content": question}]},
-    stream_mode="values",
-):
-    step["messages"][-1].pretty_print()
+# for step in agent.stream(
+#     {"messages": [{"role": "user", "content": question}]},
+#     stream_mode="values",
+# ):
+#     step["messages"][-1].pretty_print()
 
-    # 1.  The 'media' column contains a list of images. You must pick only the first image URL with 'media -> 'exterior' ->> 0 AS image' query.
+#     # 1.  The 'media' column contains a list of images. You must pick only the first image URL with 'media -> 'exterior' ->> 0 AS image' query.
 
-"""
+# """
+
+# # When querying by color:
+# #     - Join vehicle_colors table on the appropriate color_id column

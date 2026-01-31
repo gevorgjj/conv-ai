@@ -29,11 +29,83 @@ else:
 
 print(f"Connecting to database at {db_host}...")
 
+# Custom table info to reduce token usage by excluding unnecessary columns
+custom_table_info = {
+    "listing": """CREATE TABLE listing (
+        id SERIAL PRIMARY KEY,
+        mileage INTEGER NOT NULL,
+        price INTEGER NOT NULL,
+        currency VARCHAR NOT NULL,
+        media JSONB,
+        trim_name VARCHAR,
+        exterior_color_id INTEGER REFERENCES vehicle_colors(id),
+        interior_color_id INTEGER REFERENCES vehicle_colors(id),
+        model_id INTEGER REFERENCES model(id),
+        year INTEGER NOT NULL,
+        body_type TEXT NOT NULL,
+        fuel_type TEXT NOT NULL,
+        condition TEXT,
+        horsepower REAL,
+        acceleration_time REAL,
+        electric_range REAL,
+        battery_capacity REAL,
+        drivetrain_type TEXT,
+        transmission_type TEXT,
+        panoramic_sunroof BOOLEAN,
+        navigation_system BOOLEAN,
+        third_row_seats BOOLEAN
+    )""",
+    "make": """CREATE TABLE make (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        slug VARCHAR(255)
+    )""",
+    "model": """CREATE TABLE model (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        slug VARCHAR(255),
+        make_id INTEGER NOT NULL REFERENCES make(id)
+    )""",
+    "vehicle_colors": """CREATE TABLE vehicle_colors (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        base_color TEXT NOT NULL,
+        is_metallic BOOLEAN DEFAULT false,
+        is_matte BOOLEAN DEFAULT false,
+        hex_code VARCHAR(7) NOT NULL
+    )""",
+    "configuration_category": """CREATE TABLE configuration_category (
+        id SERIAL PRIMARY KEY,
+        parent_category_name VARCHAR(255) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        slug VARCHAR(255) NOT NULL,
+        "order" INTEGER DEFAULT 0
+    )""",
+    "configuration_category_item": """CREATE TABLE configuration_category_item (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        slug VARCHAR(255) NOT NULL,
+        category_id INTEGER REFERENCES configuration_category(id)
+    )""",
+    "listing_configuration_category_items": """CREATE TABLE listing_configuration_category_items (
+        listing_id INTEGER NOT NULL REFERENCES listing(id),
+        configuration_category_item_id INTEGER NOT NULL REFERENCES configuration_category_item(id),
+        value VARCHAR(1024),
+        PRIMARY KEY (listing_id, configuration_category_item_id)
+    )"""
+}
+
 try:
     if db_uri:
-        db = SQLDatabase.from_uri(db_uri, 
-                                  include_tables=["listing", "make", "model", "vehicle_colors"],
-                                  )
+        db = SQLDatabase.from_uri(
+            db_uri,
+            include_tables=[
+                "listing", "make", "model", "vehicle_colors",
+                "configuration_category", "configuration_category_item",
+                "listing_configuration_category_items"
+            ],
+            custom_table_info=custom_table_info
+        )
         print("Database connection successful.")
     else:
         db = None
@@ -143,6 +215,28 @@ if db and llm:
     - You can combine: "metallic red cars" → WHERE vc.base_color::text = '50' AND vc.is_metallic = true
     
     When displaying results, show the human-readable names (e.g., "SUV", "Electric", "AWD", "Red") instead of the numeric codes.
+
+    FETCHING DETAILED CAR INFORMATION:
+    When the user asks for "more details", "full specs", "specifications", or similar about a specific car (identified by listing.id from the conversation context), you MUST query the configuration tables:
+    
+    Query Example for Detailed Info:
+    ```sql
+    SELECT 
+        cc.slug AS category_slug,
+        cci.slug AS item_slug,
+        lcci.value
+    FROM listing_configuration_category_items lcci
+    JOIN configuration_category_item cci ON lcci.configuration_category_item_id = cci.id
+    JOIN configuration_category cc ON cci.category_id = cc.id
+    WHERE lcci.listing_id = <LISTING_ID>
+    ORDER BY cc."order", cci.id;
+    ```
+    
+    DETAILED INFO FORMATTING:
+    - Group the configuration items by their `category_slug` (e.g., "Main Parameters", "Exterior", "Emergency Kit").
+    - Use the `category_slug` as a header (e.g., **Main Parameters**).
+    - Under each category header, list items as: `item_slug`: `value` (e.g., "production_period: 2024 - 2025").
+    - If `value` is NULL or empty, you can display just the `item_slug` as a feature the car has.
 
     RESPONSE FORMATTING:
     1.  If you find cars, your response must be formatted in Markdown.

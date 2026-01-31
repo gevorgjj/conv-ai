@@ -243,6 +243,14 @@ if db and llm:
     2.  Display the image at the TOP of the car description using Markdown image syntax: `![Car Name](IMAGE_URL)`.
     3.  List the key details (Make, Model, Year, Price, HP, Range) in a bulleted list below the image.
     4.  Be polite and concise.
+    
+    CRITICAL - HIDING INTERNAL DATABASE DETAILS:
+    - NEVER expose internal database identifiers to users (e.g., listing_id, id, model_id, exterior_color_id, etc.).
+    - NEVER ask users to provide a "listing_id" or any database ID.
+    - NEVER include "Listing ID: 3014" or similar in your responses.
+    - When showing multiple cars, number them naturally (e.g., "**Car 1:**", "**Car 2:**" or "**1. 2024 BYD Yuan Up**").
+    - When the user refers to a car (e.g., "tell me more about the first one", "details on the BYD"), use the conversation context to identify which car they mean and use its listing.id internally for queries WITHOUT mentioning it.
+    - If clarification is needed, ask using human-friendly terms: "Which car would you like more details on? The 2024 BYD Yuan Up or the 2025 Hongqi E-QM5?"
     """
 
     agent = create_agent(

@@ -248,7 +248,7 @@ if db and llm:
     - NEVER expose internal database identifiers to users (e.g., listing_id, id, model_id, exterior_color_id, etc.).
     - NEVER ask users to provide a "listing_id" or any database ID.
     - NEVER include "Listing ID: 3014" or similar in your responses.
-    - When showing multiple cars, number them naturally (e.g., "**Car 1:**", "**Car 2:**" or "**1. 2024 BYD Yuan Up**").
+    - When showing multiple cars, number them naturally (e.g., "**1. 2024 BYD Yuan Up**").
     - When the user refers to a car (e.g., "tell me more about the first one", "details on the BYD"), use the conversation context to identify which car they mean and use its listing.id internally for queries WITHOUT mentioning it.
     - If clarification is needed, ask using human-friendly terms: "Which car would you like more details on? The 2024 BYD Yuan Up or the 2025 Hongqi E-QM5?"
     """
@@ -259,16 +259,23 @@ if db and llm:
         system_prompt=system_prompt,
     )
 
+# Global message cache for single-user optimization
+_message_cache = []
+_last_history_len = 0
+
 def predict(message, history):
+    global _message_cache, _last_history_len
+
     if not agent:
         return "System Error: Database connection or OpenAI Key is not set up correctly. Please check your .env file."
    
     try:
-        # Build messages list from history
-        messages = []
+
+        # Only process new messages from history that aren't in cache
+        new_messages_from_history = history[_last_history_len:]
         
         # Handle Gradio history format (list of dicts)
-        for msg in history:
+        for msg in new_messages_from_history:
             role = msg.get("role")
             content = msg.get("content")
             
@@ -280,12 +287,15 @@ def predict(message, history):
                 text = str(content)
             
             if role == "user":
-                messages.append({"role": "user", "content": text})
+                _message_cache.append({"role": "user", "content": text})
             elif role == "assistant":
-                messages.append({"role": "assistant", "content": text})
+                _message_cache.append({"role": "assistant", "content": text})
         
-        # Add current message
-        messages.append({"role": "user", "content": message})
+        # Update tracking length
+        _last_history_len = len(history)
+        
+        # Combine cache with current user message
+        messages = _message_cache + [{"role": "user", "content": message}]
 
         print("\n" + "="*50)
         print(f"USER INPUT: {message}")

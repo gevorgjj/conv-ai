@@ -5,6 +5,7 @@ from langchain_openai import ChatOpenAI
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain.agents import create_agent
+from langgraph.checkpoint.memory import MemorySaver
 
 
 # Load environment variables
@@ -121,10 +122,12 @@ else:
     llm = None
     print("WARNING: OPENAI_API_KEY not found.")
 
-# print(db.get_table_info())
+# Create Memory Saver for conversation history
+checkpointer = MemorySaver()
+
+THREAD_ID = "edrive_conv_ai"
 
 # Toolkit and Agent
-agent_executor = None
 if db and llm:
     toolkit = SQLDatabaseToolkit(db=db, llm=llm)
     all_tools = toolkit.get_tools()
@@ -136,19 +139,19 @@ if db and llm:
     
     # Custom System Message
     system_prompt = f"""You are a helpful assistant for edrive.am that helps users buy cars.
-    Your knowledge is STRICTLY limited to the information in the database, specifically the 'listing' table.
+    Your knowledge is STRICTLY limited to the information in the database, specifically the 'listing', 'make', 'model', 'vehicle_colors', 'configuration_category', 'configuration_category_item', 'listing_configuration_category_items' tables.
     
     DATABASE SCHEMA:
     {db_context}
     
     GUIDELINES:
     1.  If the user asks a question that cannot be answered using the database (e.g., "Write a novel about Burj Khalifa", "What is the capital of France?"), you must strictly reply: "I can't answer this type of question. I can only help you explore cars available on edrive.am."
-    2.  **Use the provided "Previous conversation" to understand context for follow-up questions (e.g., "show me cheaper ones" refers to the previously found cars).**
+    2.  **Use the previous conversation (from memory) to understand context for follow-up questions (e.g., "show me cheaper ones" refers to the previously found cars).**
     3.  Do NOT use your internal training knowledge to answer questions about cars. ONLY use the database tools.
     4.  When a user asks for cars, you MUST query the 'listing' table.
     5.  ALWAYS limit your SQL queries to {k} results using `LIMIT {k}` unless the user explicitly requests more.
-    6.  ALWAYS select the following columns when retrieving car details: 
-        make.slug as make_name (join with make), model.slug as model_name (join with model), price, currency, horsepower, electric_range, year, and specifically the 'media' columns first exterior image, like this 'media -> 'exterior' ->> 0 AS image'.
+    6.  ALWAYS select the following columns when retrieving car details from 'listing' table: 
+        id, make.slug as make_name (join with make), model.slug as model_name (join with model), price, currency, horsepower, electric_range, year, and specifically the 'media' columns first exterior image, like this 'media -> 'exterior' ->> 0 AS image'.
         (Note: Query the 'slug' column from both the 'make' and 'model' tables using joins).
     
     IMPORTANT COLUMN MAPPINGS:
@@ -217,9 +220,15 @@ if db and llm:
     When displaying results, show the human-readable names (e.g., "SUV", "Electric", "AWD", "Red") instead of the numeric codes.
 
     FETCHING DETAILED CAR INFORMATION:
-    When the user asks for "more details", "full specs", "specifications", or similar about a specific car (identified by listing.id from the conversation context), you MUST query the configuration tables:
+    When the user asks for "more details", "full specs", "specifications", or similar about a specific car:
     
-    Query Example for Detailed Info:
+    IMPORTANT - USE LISTING ID, NOT SLUGS:
+    - When you initially query cars, you MUST internally track each car's listing.id (but NEVER show it to users).
+    - When the user asks for details about a car from the previous results, use the listing.id you already have from that query.
+    - DO NOT try to find the car again by make.slug and model.slug - this can fail due to case sensitivity or duplicates.
+    - Example: If you showed "1. Forthing T5 Evo" and the user says "details on the first one", use the listing.id from your previous query result.
+    
+    Query Example for Detailed Info (using listing.id):
     ```sql
     SELECT 
         cc.slug AS category_slug,
@@ -248,7 +257,7 @@ if db and llm:
     - NEVER expose internal database identifiers to users (e.g., listing_id, id, model_id, exterior_color_id, etc.).
     - NEVER ask users to provide a "listing_id" or any database ID.
     - NEVER include "Listing ID: 3014" or similar in your responses.
-    - When showing multiple cars, number them naturally (e.g., "**1. 2024 BYD Yuan Up**").
+    - When showing multiple cars, number them naturally (e.g., "**1. 2024 BYD Yuan Up**", "**2. 2025 Hongqi E-QM5**").
     - When the user refers to a car (e.g., "tell me more about the first one", "details on the BYD"), use the conversation context to identify which car they mean and use its listing.id internally for queries WITHOUT mentioning it.
     - If clarification is needed, ask using human-friendly terms: "Which car would you like more details on? The 2024 BYD Yuan Up or the 2025 Hongqi E-QM5?"
     """
@@ -257,53 +266,34 @@ if db and llm:
         llm,
         tools,
         system_prompt=system_prompt,
+        checkpointer=checkpointer
     )
 
-# Global message cache for single-user optimization
-_message_cache = []
-_last_history_len = 0
 
-def predict(message, history):
-    global _message_cache, _last_history_len
+def predict(message, history, request: gr.Request):
+    global agent
 
     if not agent:
         return "System Error: Database connection or OpenAI Key is not set up correctly. Please check your .env file."
    
     try:
+        # We intentionally do NOT resend the full Gradio `history` to the agent.
+        # LangGraph's checkpointer (MemorySaver) keeps per-thread conversation state.
+        messages = [{"role": "user", "content": message}]
 
-        # Only process new messages from history that aren't in cache
-        new_messages_from_history = history[_last_history_len:]
-        
-        # Handle Gradio history format (list of dicts)
-        for msg in new_messages_from_history:
-            role = msg.get("role")
-            content = msg.get("content")
-            
-            # Extract text content
-            text = ""
-            if isinstance(content, list):
-                text = " ".join([c.get("text", "") for c in content if c.get("type") == "text"])
-            else:
-                text = str(content)
-            
-            if role == "user":
-                _message_cache.append({"role": "user", "content": text})
-            elif role == "assistant":
-                _message_cache.append({"role": "assistant", "content": text})
-        
-        # Update tracking length
-        _last_history_len = len(history)
-        
-        # Combine cache with current user message
-        messages = _message_cache + [{"role": "user", "content": message}]
 
         print("\n" + "="*50)
         print(f"USER INPUT: {message}")
         print("="*50)
 
+        # Use a per-session thread_id so different browser sessions don't share memory.
+        session_hash = getattr(request, "session_hash", None)
+        thread_id = f"{THREAD_ID}:{session_hash}" if session_hash else THREAD_ID
+        config = {"configurable": {"thread_id": thread_id}}
+
         # Stream the agent response to see tool calls
         final_response = None
-        for step in agent.stream({"messages": messages}, stream_mode="values"):
+        for step in agent.stream({"messages": messages}, config, stream_mode="values"):
             last_message = step["messages"][-1]
             
             # Check if it's a tool call (AIMessage with tool_calls)

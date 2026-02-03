@@ -46,6 +46,8 @@ custom_table_info = {
         body_type TEXT NOT NULL,
         fuel_type TEXT NOT NULL,
         condition TEXT,
+        hybrid_type TEXT,
+        engine_type TEXT,
         horsepower REAL,
         acceleration_time REAL,
         electric_range REAL,
@@ -86,6 +88,7 @@ custom_table_info = {
         id SERIAL PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
         slug VARCHAR(255) NOT NULL,
+        measurement_unit VARCHAR(255),
         category_id INTEGER REFERENCES configuration_category(id)
     )""",
     "listing_configuration_category_items": """CREATE TABLE listing_configuration_category_items (
@@ -188,6 +191,79 @@ if db and llm:
         '10' = RWD (Rear-Wheel Drive)
         '20' = AWD (All-Wheel Drive)
     
+    transmission_type (Transmission Type):
+        Automatic:
+            '0' = Automatic 2-Speed
+            '10' = Automatic 3-Speed
+            '20' = Automatic 4-Speed
+            '30' = Automatic 5-Speed
+            '40' = Automatic 6-Speed
+            '50' = Automatic 7-Speed
+            '60' = Automatic 8-Speed
+            '70' = Automatic 9-Speed
+            '80' = Automatic 10-Speed
+        '90' = CVT (Continuously Variable Transmission)
+        Manual:
+            '95' = Manual 3-Speed
+            '100' = Manual 4-Speed
+            '110' = Manual 5-Speed
+            '120' = Manual 6-Speed
+            '130' = Manual 7-Speed
+        '140' = Reducer (Single-Speed, typically for EVs)
+        Robotic:
+            '145' = Robotic 2-Speed
+            '150' = Robotic 3-Speed
+            '160' = Robotic 4-Speed
+            '170' = Robotic 5-Speed
+            '180' = Robotic 6-Speed
+            '190' = Robotic 7-Speed
+            '200' = Robotic 8-Speed
+            '210' = Robotic 9-Speed
+            '220' = Robotic 10-Speed
+    
+    condition (Vehicle Condition):
+        '0' = New
+        '10' = Used
+        '20' = Certified Pre-Owned
+    
+    hybrid_type (Hybrid Type - only applicable when fuel_type is Hybrid or Plug-in Hybrid):
+        '0' = Mild Hybrid
+        '10' = Parallel Hybrid
+        '20' = Parallel Plug-in Hybrid
+        '30' = Series Hybrid
+        '40' = Series Plug-in Hybrid
+    
+    engine_type (Engine Type):
+        Inline:
+            '0' = Inline 2-Cylinder
+            '10' = Inline 3-Cylinder
+            '20' = Inline 4-Cylinder
+            '30' = Inline 5-Cylinder
+            '40' = Inline 6-Cylinder
+            '42' = Inline 8-Cylinder
+        V-Shaped:
+            '48' = V4
+            '49' = V5
+            '50' = V6
+            '60' = V8
+            '70' = V10
+            '80' = V12
+            '90' = V16
+        Horizontally Opposed (Boxer):
+            '95' = Horizontally Opposed 2-Cylinder
+            '100' = Horizontally Opposed 4-Cylinder
+            '110' = Horizontally Opposed 6-Cylinder
+        '120' = Rotary
+        VR:
+            '125' = VR5
+            '130' = VR6
+        W:
+            '135' = W8
+            '140' = W12
+            '150' = W16
+        '160' = Electric Motor
+        '170' = 1-Cylinder
+    
     base_color (Vehicle Base Color in vehicle_colors table):
         '0' = White
         '10' = Black
@@ -216,8 +292,25 @@ if db and llm:
     - For "metallic cars": JOIN vehicle_colors vc ON listing.exterior_color_id = vc.id WHERE vc.is_metallic = true
     - For "matte cars": JOIN vehicle_colors vc ON listing.exterior_color_id = vc.id WHERE vc.is_matte = true
     - You can combine: "metallic red cars" → WHERE vc.base_color::text = '50' AND vc.is_metallic = true
+    - For "automatic transmission" or "automatic cars": use transmission_type::text IN ('0','10','20','30','40','50','60','70','80') to include all automatic variants
+    - For "6-speed automatic": use transmission_type::text = '40'
+    - For "manual transmission" or "manual cars": use transmission_type::text IN ('95','100','110','120','130')
+    - For "CVT transmission": use transmission_type::text = '90'
+    - For "new cars" or "brand new": use condition::text = '0'
+    - For "used cars": use condition::text = '10'
+    - For "certified pre-owned" or "CPO": use condition::text = '20'
+    - For "hybrid" (general): use fuel_type::text = '30'
+    - For "plug-in hybrid" (general): use fuel_type::text = '60'
+    - For "mild hybrid" (specific type): use hybrid_type::text = '0'
+    - For "parallel plug-in hybrid" (specific type): use hybrid_type::text = '20'
+    - For "series plug-in hybrid" (specific type): use hybrid_type::text = '40'
+    - For "V6 engine" or "V6": use engine_type::text = '50'
+    - For "V8 engine" or "V8": use engine_type::text = '60'
+    - For "inline 4-cylinder" or "I4": use engine_type::text = '20'
+    - For "electric motor" (for EVs): use engine_type::text = '160'
+    - For "boxer engine" or "horizontally opposed": use engine_type::text IN ('95','100','110')
     
-    When displaying results, show the human-readable names (e.g., "SUV", "Electric", "AWD", "Red") instead of the numeric codes.
+    When displaying results, show the human-readable names (e.g., "SUV", "Electric", "AWD", "Red", "Automatic 6-Speed", "New", "V6") instead of the numeric codes.
 
     FETCHING DETAILED CAR INFORMATION:
     When the user asks for "more details", "full specs", "specifications", or similar about a specific car:
@@ -233,6 +326,7 @@ if db and llm:
     SELECT 
         cc.slug AS category_slug,
         cci.slug AS item_slug,
+        cci.measurement_unit,
         lcci.value
     FROM listing_configuration_category_items lcci
     JOIN configuration_category_item cci ON lcci.configuration_category_item_id = cci.id
@@ -244,7 +338,9 @@ if db and llm:
     DETAILED INFO FORMATTING:
     - Group the configuration items by their `category_slug` (e.g., "Main Parameters", "Exterior", "Emergency Kit").
     - Use the `category_slug` as a header (e.g., **Main Parameters**).
-    - Under each category header, list items as: `item_slug`: `value` (e.g., "production_period: 2024 - 2025").
+    - Under each category header, list items as: `item_slug`: `value` with the measurement unit if available.
+    - If `measurement_unit` is present and `value` is numeric, display as: `item_slug`: `value measurement_unit` (e.g., "acceleration_time_0_100: 7.9 s" or "maximum_speed: 180 km/h").
+    - If `measurement_unit` is NULL or empty, display as: `item_slug`: `value` (e.g., "production_period: 2024 - 2025").
     - If `value` is NULL or empty, you can display just the `item_slug` as a feature the car has.
 
     RESPONSE FORMATTING:

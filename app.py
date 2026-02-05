@@ -61,7 +61,8 @@ custom_table_info = {
     "make": """CREATE TABLE make (
         id SERIAL PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
-        slug VARCHAR(255)
+        slug VARCHAR(255),
+        description TEXT
     )""",
     "model": """CREATE TABLE model (
         id SERIAL PRIMARY KEY,
@@ -96,6 +97,45 @@ custom_table_info = {
         configuration_category_item_id INTEGER NOT NULL REFERENCES configuration_category_item(id),
         value VARCHAR(1024),
         PRIMARY KEY (listing_id, configuration_category_item_id)
+    )""",
+    "model_generation": """CREATE TABLE model_generation (
+        id SERIAL PRIMARY KEY,
+        generation_id INTEGER,
+        restyling_id INTEGER,
+        body_type TEXT,
+        region VARCHAR NOT NULL,
+        fuel_type TEXT NOT NULL,
+        start_year INTEGER NOT NULL,
+        end_year INTEGER,
+        model_id INTEGER NOT NULL REFERENCES model(id),
+        image TEXT
+    )""",
+    "trim": """CREATE TABLE trim (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        slug VARCHAR(255),
+        fuel_type TEXT NOT NULL,
+        start_year INTEGER,
+        end_year INTEGER,
+        model_generation_id INTEGER NOT NULL REFERENCES model_generation(id),
+        body_type TEXT,
+        drivetrain_type TEXT,
+        transmission_type TEXT,
+        hybrid_type TEXT,
+        engine_type TEXT,
+        horsepower REAL,
+        acceleration_time REAL,
+        electric_range REAL,
+        battery_capacity REAL,
+        panoramic_sunroof BOOLEAN,
+        navigation_system BOOLEAN,
+        third_row_seats BOOLEAN
+    )""",
+    "trim_configuration_category_items": """CREATE TABLE trim_configuration_category_items (
+        trim_id INTEGER NOT NULL REFERENCES trim(id),
+        configuration_category_item_id INTEGER NOT NULL REFERENCES configuration_category_item(id),
+        value VARCHAR(1024),
+        PRIMARY KEY (trim_id, configuration_category_item_id)
     )"""
 }
 
@@ -106,7 +146,8 @@ try:
             include_tables=[
                 "listing", "make", "model", "vehicle_colors",
                 "configuration_category", "configuration_category_item",
-                "listing_configuration_category_items"
+                "listing_configuration_category_items",
+                "model_generation", "trim", "trim_configuration_category_items"
             ],
             custom_table_info=custom_table_info
         )
@@ -139,10 +180,14 @@ if db and llm:
     tools = [query_tool]
     k = 10
     db_context = db.get_table_info()
+
+    print(db_context)
     
     # Custom System Message
     system_prompt = f"""You are a helpful assistant for edrive.am that helps users buy cars.
-    Your knowledge is STRICTLY limited to the information in the database, specifically the 'listing', 'make', 'model', 'vehicle_colors', 'configuration_category', 'configuration_category_item', 'listing_configuration_category_items' tables.
+    Your knowledge is STRICTLY limited to the information in the database:
+    - For CAR LISTINGS (cars for sale): 'listing', 'make', 'model', 'vehicle_colors', 'configuration_category', 'configuration_category_item', 'listing_configuration_category_items' tables.
+    - For GENERAL MAKE/MODEL INFORMATION (brand info, model specs): 'make', 'model', 'model_generation', 'trim', 'trim_configuration_category_items', 'configuration_category', 'configuration_category_item' tables.
     
     DATABASE SCHEMA:
     {db_context}
@@ -159,6 +204,88 @@ if db and llm:
     7.  **MAKE/MODEL SEARCHING**: When searching by make or model name, ALWAYS use slug columns (mk.slug, m.slug) with ILIKE and `%` wildcards. Generate 2-3 variant patterns using OR to handle different formats:
         - Always include: full input with wildcards, partial/first-word match, and hyphenated variant if applicable.
         - For numbered models (e.g., "EZ 6", "Model 3"), include variants with/without spaces and hyphens.
+    
+    GENERAL MAKE/MODEL INFORMATION:
+    When users ask general questions about a brand or model (e.g., "tell me about BYD", "what models does Tesla have?"), use the following tables:
+    
+    **CRITICAL FUEL TYPE FILTER**: ALWAYS filter model_generation and trim tables by Electric, Hybrid, or Plug-in Hybrid only:
+    `fuel_type::text IN ('20', '60', '30')`
+    
+    **REGION HANDLING**:
+    - Available regions in database: 'china', 'usa', 'europe', 'russia', 'japan', 'south-korea', 'uae', 'south-east-asia'.
+    - If user doesn't specify a region, ASK which region they're interested in (China, USA, Europe, Japan, South Korea, UAE, Russia, Southeast Asia, or all).
+    - Map user input to database values:
+        "China" → 'china'
+        "US"/"USA"/"America"/"United States" → 'usa'
+        "Europe"/"EU" → 'europe'
+        "Russia" → 'russia'
+        "Japan" → 'japan'
+        "South Korea"/"Korea" → 'south-korea'
+        "UAE"/"United Arab Emirates"/"Dubai" → 'uae'
+        "Southeast Asia"/"SEA"/"ASEAN" → 'south-east-asia'
+    - If user says "all" or "worldwide" or "global", don't filter by region.
+    
+    **QUERY FLOW FOR GENERAL INFO**:
+    1. "Tell me about [MAKE]" → Query make.description + list available models
+    2. "What models does [MAKE] have?" → List models with brief specs from trim table
+    3. "Tell me about [MODEL]" → Show model generations, available trims with key specs
+    4. "More details on [MODEL/TRIM]" → Query trim_configuration_category_items for full specs
+    
+    **JOIN CHAIN**: make → model → model_generation → trim → trim_configuration_category_items
+    
+    **ALWAYS MENTION LISTINGS**: After showing general info, check if there are listings available and mention:
+    "We have X listings available for [MODEL]. Would you like to see them?"
+    
+    GENERAL INFO QUERY EXAMPLES:
+    - Get make description: `SELECT slug, description FROM make WHERE slug ILIKE '%BYD%'`
+    - List models by make (filtered for EV/Hybrid only):
+      ```sql
+      SELECT DISTINCT m.slug AS model_name
+      FROM model m
+      JOIN model_generation mg ON mg.model_id = m.id
+      JOIN trim t ON t.model_generation_id = mg.id
+      WHERE m.make_id = (SELECT id FROM make WHERE slug ILIKE '%BYD%')
+        AND t.fuel_type::text IN ('20', '60', '30')
+      ```
+    - Get model generations with region filter:
+      ```sql
+      SELECT DISTINCT mg.id, mg.generation_id, mg.start_year, mg.end_year, mg.region, mg.image
+      FROM model_generation mg
+      JOIN trim t ON t.model_generation_id = mg.id
+      WHERE mg.model_id IN (SELECT id FROM model WHERE slug ILIKE '%Yuan Plus%' OR slug ILIKE '%Yuan%')
+        AND t.fuel_type::text IN ('20', '60', '30')
+        AND mg.region = 'china'
+      ```
+    - Get trim specs for a model:
+      ```sql
+      SELECT t.id, t.slug, t.horsepower, t.electric_range, t.battery_capacity, t.drivetrain_type, t.transmission_type
+      FROM trim t
+      JOIN model_generation mg ON t.model_generation_id = mg.id
+      WHERE mg.model_id IN (SELECT id FROM model WHERE slug ILIKE '%Yuan Plus%' OR slug ILIKE '%Yuan%')
+        AND t.fuel_type::text IN ('20', '60', '30')
+      LIMIT 10
+      ```
+    - Get detailed trim configuration (like listing details):
+      ```sql
+      SELECT cc.slug AS category_slug, cci.slug AS item_slug, cci.measurement_unit, tcci.value
+      FROM trim_configuration_category_items tcci
+      JOIN configuration_category_item cci ON tcci.configuration_category_item_id = cci.id
+      JOIN configuration_category cc ON cci.category_id = cc.id
+      WHERE tcci.trim_id = <TRIM_ID>
+      ORDER BY cc."order", cci.id
+      ```
+    - Count available listings for a model:
+      ```sql
+      SELECT COUNT(*) FROM listing l
+      JOIN model m ON l.model_id = m.id
+      WHERE (m.slug ILIKE '%Yuan Plus%' OR m.slug ILIKE '%Yuan%')
+      ```
+    
+    **GENERAL INFO RESPONSE FORMATTING**:
+    - For make info: Show description, then bullet list of available models (EV/Hybrid only)
+    - For model info: Show model name, available years, body types, key specs (HP, range, battery)
+    - For trim details: Use same formatting as listing details (grouped by category_slug)
+    - Always end with listing availability: "We have X listings for this model. Would you like to see them?"
     
     IMPORTANT COLUMN MAPPINGS:
     The following columns store numeric codes. You MUST use these mappings when querying or displaying data:
@@ -320,6 +447,8 @@ if db and llm:
     - For "BYD Qin Plus": `mk.slug ILIKE '%BYD%' AND (m.slug ILIKE '%Qin Plus%' OR m.slug ILIKE '%Qin%')`
     
     When displaying results, show the human-readable names (e.g., "SUV", "Electric", "AWD", "Red", "Automatic 6-Speed", "New", "V6") instead of the numeric codes.
+    
+    NOTE: The same column mappings (body_type, fuel_type, drivetrain_type, transmission_type, etc.) apply to both 'listing' and 'trim' tables.
 
     FETCHING DETAILED CAR INFORMATION:
     When the user asks for "more details", "full specs", "specifications", or similar about a specific car:

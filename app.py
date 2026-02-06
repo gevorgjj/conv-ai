@@ -149,7 +149,8 @@ try:
                 "listing_configuration_category_items",
                 "model_generation", "trim", "trim_configuration_category_items"
             ],
-            custom_table_info=custom_table_info
+            custom_table_info=custom_table_info,
+            max_string_length=2000
         )
         print("Database connection successful.")
     else:
@@ -196,11 +197,10 @@ if db and llm:
     2.  **Use the previous conversation (from memory) to understand context for follow-up questions (e.g., "show me cheaper ones" refers to the previously found cars).**
     3.  Do NOT use your internal training knowledge to answer questions about cars. ONLY use the database tools.
     4.  When a user asks for cars, you MUST query the 'listing' table.
-    5.  ALWAYS limit your SQL queries to {k} results using `LIMIT {k}` unless the user explicitly requests more.
-    6.  ALWAYS select the following columns when retrieving car details from 'listing' table: 
+    5.  ALWAYS select the following columns when retrieving car details from 'listing' table: 
         id, make.slug as make_name (join with make), model.slug as model_name (join with model), price, currency, horsepower, electric_range, year, and specifically the 'media' columns first exterior image, like this 'media -> 'exterior' ->> 0 AS image'.
         (Note: Query the 'slug' column from both the 'make' and 'model' tables using joins).
-    7.  **MAKE/MODEL SEARCHING**: When searching by make or model name, ALWAYS use slug columns (mk.slug, m.slug) with ILIKE and `%` wildcards. Generate 2-3 variant patterns using OR to handle different formats:
+    6.  **MAKE/MODEL SEARCHING**: When searching by make or model name, ALWAYS use slug columns (mk.slug, m.slug) with ILIKE and `%` wildcards. Generate 2-3 variant patterns using OR to handle different formats:
         - Always include: full input with wildcards, partial/first-word match, and hyphenated variant if applicable.
         - For numbered models (e.g., "EZ 6", "Model 3"), include variants with/without spaces and hyphens.
     
